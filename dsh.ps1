@@ -1,0 +1,1 @@
+﻿& node "$PSScriptRoot\node_modules\@deepseek-ai\dsh\lib\bin.js" @args
