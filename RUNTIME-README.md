@@ -9,7 +9,7 @@
    | `dsh-user-system-prompt` | 自定义系统提示词（设置→系统提示词） |
    | `dsh-notification-sounds` | 任务完成/报错/提权提示音（设置→提示音） |
    | `dsh-custom-background` | 自定义背景壁纸（设置→背景） |
-   | `dsh-model-probe` | 模型连通性探测 + 已存 key 读回 + 伴生 key 池（设置→模型探测） |
+   | `dsh-model-probe` | 模型连通性探测 + 已存 key 读回（仅宿主路由 `/probe` `/key`；探测 UI 集成在官方"模型"页内，**无独立分区**，与 0.1.2 原形态一致） |
    | `dsh-key-rotation` | `<ref>_2`…`<ref>_9` 多 key 逐请求轮换（无 UI，宿主面） |
    | `dsh-session-archive` | 归档会话恢复/永久删除（设置→归档） |
 2. **稳健性修复层 = 8 个 patch-package 补丁**（在本目录 `patches/`，`npm install` 后由 postinstall 自动重放）：
@@ -37,7 +37,8 @@
      再 `npx patch-package <包名>` 重新生成补丁。
 3. 插件不受升级影响（它们在 `~/.dsh` 里）。若某个插件依赖的官方内部结构在新版变了，
    插件会自检失败并报错（如 dsh-session-archive 的 registry 断言），按 inventory 适配即可。
-4. 冒烟：`dsh web --no-open`，打开设置确认六个分区仍在。
+4. 冒烟：`dsh web --no-open`，打开设置确认四个自建分区（系统提示词/提示音/背景/归档）仍在，
+   "模型"页里每个模型行的"测试连接"按钮可用。
 
 **不要再使用 robocopy /MIR 覆盖 node_modules 的旧升级法**——那会抹掉 patch-package 补丁。
 
