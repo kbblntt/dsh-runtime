@@ -1,0 +1,192 @@
+diff --git a/node_modules/@deepseek-ai/dsh-api-session-controller/lib/client.js b/node_modules/@deepseek-ai/dsh-api-session-controller/lib/client.js
+index 6226c83..e6a6f16 100644
+--- a/node_modules/@deepseek-ai/dsh-api-session-controller/lib/client.js
++++ b/node_modules/@deepseek-ai/dsh-api-session-controller/lib/client.js
+@@ -1503,6 +1503,10 @@ window.__ModuleLoader__.load({
+ 				asOfSeq: value.asOfSeq === -1 ? -1 : SessionSeq(value.asOfSeq)
+ 			};
+ 		}
++		/** Remote failures a fresh open can never repair; automatic resync must not chase them. */
++		const STREAM_RETRY_BLOCKED_CODES = new Set(["session/not-found", "subagent/unauthorized", "session/agent-busy"]);
++		/** Upper bound of the automatic resync backoff after repeated terminal stream failures. */
++		const STREAM_RETRY_MAX_DELAY_MS = 30000;
+ 		/**
+ 		* Owns a session's event window, lifecycle state, and observable
+ 		* snapshot. React bindings remain outside this data layer. Features see only
+@@ -1526,6 +1530,12 @@ window.__ModuleLoader__.load({
+ 			jumpTargetSeq = null;
+ 			/** The running jump loop's completion, shared by retargeting callers. */
+ 			jumpPromise = null;
++			/** Consecutive terminal event-stream failures; drives resync backoff, reset on each successful open. */
++			streamRetryAttempt = 0;
++			/** Pending automatic resync timer after a terminal event-stream failure. */
++			streamRetryTimer = null;
++			/** Latched by dispose(): cancels pending stream retries for this resident instance. */
++			streamDisposed = false;
+ 			/** Authoritative stream-only inbox snapshot; pending work never hits history. */
+ 			queueMirror = new SessionQueueMirror();
+ 			assistantStream = new ClientAssistantStream();
+@@ -1651,6 +1661,7 @@ window.__ModuleLoader__.load({
+ 				this.promptError = null;
+ 				this.lastAgentError = null;
+ 				this.promptAttempted = true;
++				if (this.openState === "error") this.resyncSoon();
+ 				if (this.blankBit) this.firstPromptPendingTurn = true;
+ 				this.notifier.markDirty();
+ 				let result;
+@@ -1969,6 +1980,11 @@ window.__ModuleLoader__.load({
+ 			* @returns when the Remote iterator has completed teardown.
+ 			*/
+ 			async dispose() {
++				this.streamDisposed = true;
++				if (this.streamRetryTimer !== null) {
++					clearTimeout(this.streamRetryTimer);
++					this.streamRetryTimer = null;
++				}
+ 				for (const requestId of [...this.submissionSettlements.keys()]) this.retireFailedSubmission(requestId);
+ 				this.openGeneration++;
+ 				const events = this.events;
+@@ -1994,12 +2010,14 @@ window.__ModuleLoader__.load({
+ 					await events.open({ maxMessages: 50 });
+ 					if (generation !== this.openGeneration || this.events !== events) return;
+ 					this.openState = "open";
++					this.streamRetryAttempt = 0;
+ 				} catch (error) {
+ 					if (generation !== this.openGeneration || this.events !== events) return;
+-					if (!(0, _deepseek_ai_dsh_api_gateway_client.isRemoteFailure)(error)) throw error;
++					const failure = (0, _deepseek_ai_dsh_api_gateway_client.isRemoteFailure)(error) ? error : new RemoteError("gateway/internal", error instanceof Error ? error.message : String(error), {}, { cause: error });
+ 					this.events = void 0;
+ 					this.openState = "error";
+-					this.openError = error;
++					this.openError = failure;
++					this.scheduleStreamRetry(failure);
+ 				} finally {
+ 					if (generation === this.openGeneration) this.notifier.markDirty();
+ 				}
+@@ -2121,14 +2139,46 @@ window.__ModuleLoader__.load({
+ 			/** Publish a terminal background failure only while this stream still owns the Session. */
+ 			failEventStream(events, generation, error) {
+ 				if (generation !== this.openGeneration || this.events !== events) return;
+-				if (!(0, _deepseek_ai_dsh_api_gateway_client.isRemoteFailure)(error)) throw error;
++				const failure = (0, _deepseek_ai_dsh_api_gateway_client.isRemoteFailure)(error) ? error : new RemoteError("gateway/internal", error instanceof Error ? error.message : String(error), {}, { cause: error });
+ 				this.openGeneration++;
+ 				this.events = void 0;
+ 				this.openPromise = null;
+ 				this.openState = "error";
+-				this.openError = error;
++				this.openError = failure;
+ 				events.dispose();
+ 				this.notifier.markDirty();
++				this.scheduleStreamRetry(failure);
++			}
++			/**
++			* Schedule one automatic resync after a terminal event-stream failure. Backoff
++			* doubles per consecutive failure (capped) and resets on each successful open,
++			* so a transient carrier or protocol failure heals itself with a fresh opening
++			* snapshot instead of freezing the transcript until a manual page refresh.
++			* Permanent failures (not-found, unauthorized, busy) are never retried.
++			*/
++			scheduleStreamRetry(error) {
++				if (this.streamRetryTimer !== null) return;
++				if (this.streamDisposed) return;
++				const code = typeof error?.code === "string" ? error.code : void 0;
++				if (code !== void 0 && STREAM_RETRY_BLOCKED_CODES.has(code)) return;
++				const attempt = this.streamRetryAttempt;
++				this.streamRetryAttempt = attempt + 1;
++				const delay = Math.min(STREAM_RETRY_MAX_DELAY_MS, 1000 * Math.pow(2, Math.min(attempt, 5)));
++				this.streamRetryTimer = setTimeout(() => {
++					this.streamRetryTimer = null;
++					if (this.streamDisposed || this.openState !== "error") return;
++					this.resync().catch(() => {});
++				}, delay);
++			}
++			/** Cancel any pending stream retry and resync immediately (user-initiated work). */
++			resyncSoon() {
++				if (this.streamRetryTimer !== null) {
++					clearTimeout(this.streamRetryTimer);
++					this.streamRetryTimer = null;
++				}
++				if (this.streamDisposed || this.openState !== "error") return;
++				this.streamRetryAttempt = 0;
++				this.resync().catch(() => {});
+ 			}
+ 			buildSnapshot() {
+ 				return {
+@@ -3519,16 +3569,37 @@ window.__ModuleLoader__.load({
+ 			ctx.remote.$on("api-session/error", (sessionId, message) => {
+ 				sessions.handleSessionError(sessionId, message);
+ 			});
+-			const control = createSessionControlStream(remotes, {
+-				accept: (frame) => {
+-					sessions.handleControlFrame(frame);
+-				},
+-				failed: (error) => {
+-					console.error("[session-controller] control stream failed:", error);
+-				}
+-			});
++			let controlRetryTimer = null;
++			let controlRetryAttempt = 0;
++			let control;
++			const controlAccept = (frame) => {
++				controlRetryAttempt = 0;
++				sessions.handleControlFrame(frame);
++			};
++			const controlFailed = (error) => {
++				console.error("[session-controller] control stream failed:", error);
++				scheduleControlRestart();
++			};
++			const rebuildControl = () => {
++				const previous = control;
++				control = createSessionControlStream(remotes, { accept: controlAccept, failed: controlFailed });
++				control.start();
++				previous?.dispose().catch(() => {});
++			};
++			const scheduleControlRestart = () => {
++				if (controlRetryTimer !== null) return;
++				const attempt = controlRetryAttempt;
++				controlRetryAttempt = attempt + 1;
++				controlRetryTimer = setTimeout(() => {
++					controlRetryTimer = null;
++					rebuildControl();
++				}, Math.min(STREAM_RETRY_MAX_DELAY_MS, 1000 * Math.pow(2, Math.min(attempt, 5))));
++			};
++			control = createSessionControlStream(remotes, { accept: controlAccept, failed: controlFailed });
+ 			control.start();
+ 			ctx.on("connection/reset", () => {
++				controlRetryAttempt = 0;
++				rebuildControl();
+ 				sessions.handleConnected();
+ 			});
+ 			if (ctx.remote.$host.home !== void 0) sessions.handleConnected();
+@@ -3537,6 +3608,10 @@ window.__ModuleLoader__.load({
+ 				resolve: (sessionId) => sessions.resolveAgentScope(sessionId)
+ 			});
+ 			ctx.effect(() => async () => {
++				if (controlRetryTimer !== null) {
++					clearTimeout(controlRetryTimer);
++					controlRetryTimer = null;
++				}
+ 				await control.dispose();
+ 			}, "session-controller.client.control");
+ 		}
+diff --git a/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js b/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js
+index 0e94dd3..93cfbcf 100644
+--- a/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js
+@@ -1500,7 +1500,15 @@ var SessionHistoryController = class {
+ 					}
+ 					const expectedSeq = SessionSeq(nextOffset);
+ 					if (item.event.seq < expectedSeq) continue;
+-					if (item.event.seq !== expectedSeq) throw new RemoteError("gateway/internal", `session event stream skipped seq ${String(expectedSeq)}`, {});
++					if (item.event.seq !== expectedSeq) {
++						/* A missed delivery leaves a permanent seq hole. End the stream cleanly
++						 * instead of throwing: the client treats a clean end as a carrier fault,
++						 * retries, and re-baselines from a fresh opening snapshot. An error frame
++						 * here would instead kill the client stream terminally and freeze the
++						 * transcript until a manual refresh. */
++						console.warn(`session event stream skipped seq ${String(expectedSeq)}; re-baselining the live stream`);
++						return;
++					}
+ 					nextOffset = SessionLogOffset(nextOffset + 1);
+ 					yield entryFor(item.event);
+ 				}

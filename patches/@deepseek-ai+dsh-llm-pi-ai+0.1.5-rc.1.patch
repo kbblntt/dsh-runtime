@@ -1,0 +1,137 @@
+diff --git a/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js b/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js
+index e06cf8d..519226d 100644
+--- a/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js
+@@ -2112,6 +2112,18 @@ function authContextFrom(ctx) {
+ * Every other protocol reports that it cannot be interrogated so the surface
+ * falls back to hand-entry rather than guessing its response fields.
+ *
++* Each listing entry's context capacity is read from the metadata the entry
++* itself discloses — every field spelling the wire has shipped a context
++* window or an output cap under (`context_window`/`contextWindow`,
++* `context_length`, the fields self-hosted servers and gateways actually
++* ship — vLLM's `max_model_len`, LM Studio's `max_context_length`, Novita's
++* `context_size`, LiteLLM's `max_input_tokens` — and the nested slots
++* OpenRouter's `top_provider`, `limit`, and `metadata` blobs use). An entry
++* that discloses nothing still names an id, and an id the installed catalog
++* knows contributes its own nominal context window — the best a bare listing
++* can offer.
++*
++*
+ * @module dsh-llm-pi-ai/discovery
+ */
+ /**
+@@ -2144,6 +2156,83 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+ function capacity(...candidates) {
+ 	for (const candidate of candidates) if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) return candidate;
+ }
++/**
++* The key paths a listing entry may carry its context window at, most exact
++* first: the two spellings the wire has long agreed on, then the field names
++* self-hosted servers and gateways actually ship — vLLM's `max_model_len`,
++* LM Studio's `max_context_length`, Novita's `context_size` — then the nested
++* slots OpenRouter's `top_provider` and `metadata` blobs use, and last the
++* input cap a proxy server reports instead of a context window.
++*/
++const CONTEXT_WINDOW_PATHS = [
++	["contextWindow"],
++	["context_window"],
++	["context_length"],
++	["top_provider", "context_length"],
++	["limit", "context"],
++	["max_model_len"],
++	["max_context_length"],
++	["context_size"],
++	["metadata", "context_length"],
++	["metadata", "context_window"],
++	["metadata", "max_model_len"],
++	["metadata", "max_input_tokens"],
++	["max_input_tokens"]
++];
++/** The output-cap paths, same idea: OpenAI's two spellings, then the nested slots. */
++const MAX_TOKENS_PATHS = [
++	["maxOutputTokens"],
++	["max_output_tokens"],
++	["max_completion_tokens"],
++	["top_provider", "max_completion_tokens"],
++	["maxTokens"],
++	["max_tokens"],
++	["limit", "output"],
++	["metadata", "max_output_tokens"],
++	["metadata", "max_tokens"]
++];
++/**
++* Read the first usable number along the given key paths of one entry. Table
++* order decides, so a gateway that reports both a context spelling and a
++* proxy bound keeps the context spelling.
++* @param entry - one listing entry.
++* @param paths - key paths, most exact spelling first.
++* @returns the first usable value, or `undefined` when none is.
++*/
++function capacityAt(entry, paths) {
++	for (const path of paths) {
++		let value = entry;
++		for (const key of path) {
++			if (typeof value !== "object" || value === null) {
++				value = void 0;
++				break;
++			}
++			value = value[key];
++		}
++		const usable = capacity(value);
++		if (usable !== void 0) return usable;
++	}
++}
++let catalogCapacityByIdMemo;
++/**
++* The installed catalog's context windows by model id, built once. An endpoint
++* that discloses no per-model capacity — the plain OpenAI listing shape —
++* still names ids, and an id the catalog knows carries its own nominal context
++* window, which is the best a bare listing can offer.
++* @returns context windows by model id across every installed provider.
++*/
++function catalogCapacityById() {
++	catalogCapacityByIdMemo ??= (() => {
++		const byId = /* @__PURE__ */ new Map();
++		for (const provider of getBuiltinProviders()) {
++			for (const model of getBuiltinModels(provider)) {
++				if (!byId.has(model.id) && typeof model.contextWindow === "number" && Number.isInteger(model.contextWindow) && model.contextWindow > 0) byId.set(model.id, model.contextWindow);
++			}
++		}
++		return byId;
++	})();
++	return catalogCapacityByIdMemo;
++}
+ /** A non-empty string field of a listing entry, or `undefined`. */
+ function label(...candidates) {
+ 	for (const candidate of candidates) if (typeof candidate === "string" && candidate.length > 0) return candidate;
+@@ -2215,6 +2304,12 @@ async function readBounded(response, url) {
+ * interrogation: a single malformed row should not deny the user the rest of
+ * a working endpoint's catalog. Missing names fall back to the adopted id so
+ * the Web form receives a complete human-readable row.
++*
++* Each entry's capacities come from its own metadata first — every field
++* spelling the wire has shipped a context window or an output cap under — and
++* an entry that discloses no context window falls back to the installed
++* catalog's nominal value for its id, so a gateway serving known models still
++* adopts rows that carry a real capacity.
+ */
+ function readListing(body) {
+ 	const listing = body;
+@@ -2230,13 +2325,14 @@ function readListing(body) {
+ 		}));
+ 	}
+ 	const models = [];
++	const catalog = catalogCapacityById();
+ 	for (const { key, raw } of listed) {
+ 		const entry = raw;
+ 		const id = label(key, entry?.id);
+ 		if (id === void 0) continue;
+ 		const name = label(entry?.name, entry?.display_name, entry?.displayName) ?? id;
+-		const contextWindow = capacity(entry?.contextWindow, entry?.context_window, entry?.context_length, entry?.max_input_tokens, entry?.limit?.context);
+-		const maxTokens = capacity(entry?.maxOutputTokens, entry?.max_output_tokens, entry?.maxTokens, entry?.max_tokens, entry?.limit?.output, entry?.top_provider?.max_completion_tokens);
++		const contextWindow = capacityAt(entry, CONTEXT_WINDOW_PATHS) ?? catalog.get(id);
++		const maxTokens = capacityAt(entry, MAX_TOKENS_PATHS);
+ 		models.push({
+ 			id,
+ 			name,

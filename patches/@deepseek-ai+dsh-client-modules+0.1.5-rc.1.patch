@@ -1,0 +1,109 @@
+diff --git a/node_modules/@deepseek-ai/dsh-client-modules/lib/client.js b/node_modules/@deepseek-ai/dsh-client-modules/lib/client.js
+index bc39656..9b9c023 100644
+--- a/node_modules/@deepseek-ai/dsh-client-modules/lib/client.js
++++ b/node_modules/@deepseek-ai/dsh-client-modules/lib/client.js
+@@ -194,6 +194,10 @@ window.__ModuleLoader__.load({
+ 			reloadUrls = /* @__PURE__ */ new Map();
+ 			/** Materialization re-entrancy guard: factory-form CJS cannot deliver partial exports, so a cycle is fatal. */
+ 			materializing = /* @__PURE__ */ new Set();
++			/** In-flight boot-graph refresh (self-heal after a host-side revision rotation). */
++			manifestRefresh = void 0;
++			/** Timestamp of the last successful manifest adoption; bounds heal retries. */
++			lastManifestAdoption = 0;
+ 			graphRows = /* @__PURE__ */ new Map();
+ 			loadBundle;
+ 			/**
+@@ -247,8 +251,49 @@ window.__ModuleLoader__.load({
+ 				return transport.then(() => {
+ 					if (!this.factories.has(id)) throw new Error(`client-modules: bundle ${url} loaded without registering "${id}" via __ModuleLoader__.load`);
+ 					if (reloadUrl !== void 0 && this.reloadUrls.get(id) === reloadUrl) this.reloadUrls.delete(id);
++				}).catch(async (error) => {
++					if (this.loadCache.has(id) || this.factories.has(id)) return;
++					/* Self-heal: the host rotates bundle revisions when watched plugin files
++					 * change under a live page, and a compose racing a file write can serve
++					 * torn bytes; both make a boot-time bundle URL 404 or fail to parse.
++					 * Adopt a freshly served boot graph and retry the row once. */
++					const freshRow = await this.adoptFreshManifest().then((adopted) => adopted === true ? this.graphRows.get(id) : void 0).catch(() => void 0);
++					if (freshRow === void 0) throw error;
++					console.warn(`[client-modules] bundle ${url} failed (stale revision or torn bundle); adopted a fresh boot graph and retrying "${id}"`);
++					await this.arriveGraphRow(freshRow);
++					if (!this.factories.has(id) && !this.loadCache.has(id)) throw error;
+ 				});
+ 			}
++			/** Adopt a freshly served boot graph so retries use live bundle revisions. Coalesced; bounded by a cooldown. */
++			adoptFreshManifest() {
++				if (Date.now() - this.lastManifestAdoption < 2000) return Promise.resolve(false);
++				if (this.manifestRefresh !== void 0) return this.manifestRefresh;
++				this.manifestRefresh = this.readFreshManifest().finally(() => {
++					this.manifestRefresh = void 0;
++				});
++				return this.manifestRefresh;
++			}
++			async readFreshManifest() {
++				if (typeof fetch !== "function") return false;
++				const response = await fetch("/", { cache: "no-store", credentials: "same-origin" });
++				if (!response.ok) return false;
++				const html = await response.text();
++				const match = html.match(/<script>\s*(?:globalThis\s*\[\s*["']__DSH_BOOT__["']\s*\]|window\s*\.\s*__DSH_BOOT__)\s*=\s*(\{[\s\S]*?\})\s*<\/script>/);
++				if (match === null) return false;
++				let wire;
++				try {
++					wire = JSON.parse(match[1]);
++				} catch {
++					return false;
++				}
++				const manifest = parseBootManifest(wire);
++				this.manifest = manifest;
++				const rows = /* @__PURE__ */ new Map();
++				for (const refreshed of manifest.modules) rows.set(refreshed.id, refreshed);
++				this.graphRows = rows;
++				this.lastManifestAdoption = Date.now();
++				return true;
++			}
+ 			/** Register each injected package and unresolved dynamic request before its consumer. */
+ 			async arriveGraphRow(row, open = [], visited = /* @__PURE__ */ new Set()) {
+ 				const cycleStart = open.indexOf(row.id);
+diff --git a/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js b/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js
+index b60880c..c69a606 100644
+--- a/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js
+@@ -588,9 +588,28 @@ var ClientModuleRegistry = class extends Service {
+ 		const bootstrap = PARSER_PRELOAD_IDS.map((id) => this.table.get(id)).filter((record) => record !== void 0);
+ 		const bootstrapIds = new Set(bootstrap.map((record) => record.entry.id));
+ 		const application = entries.filter((entry) => !bootstrapIds.has(entry.id)).map((entry) => this.table.get(entry.id)).filter((record) => record !== void 0);
++		/** Compile-check composed bytes so a torn plugin file read is never cached as a servable bundle. */
++		const validatedArtifact = (artifact, rebuild) => {
++			let failure;
++			try {
++				new Function(artifact.script);
++			} catch (error) {
++				failure = error;
++			}
++			if (failure === void 0) return artifact;
++			const label = artifact.descriptor !== void 0 ? artifact.descriptor.url : artifact.url;
++			const retried = rebuild();
++			try {
++				new Function(retried.script);
++			} catch (error) {
++				throw new Error(`client-modules: composed bundle ${label} still fails to parse after one rebuild (${String(error)})`, { cause: error });
++			}
++			this.ctx.logger.warn?.(`client-modules: composed bundle ${label} was torn (failed to parse once); rebuilt successfully`);
++			return retried;
++		};
+ 		const artifacts = [];
+-		for (const records of partitionComboRecords(bootstrap)) artifacts.push(buildBatch("bootstrap", records));
+-		for (const records of partitionComboRecords(application)) artifacts.push(buildBatch("application", records));
++		for (const records of partitionComboRecords(bootstrap)) artifacts.push(validatedArtifact(buildBatch("bootstrap", records), () => buildBatch("bootstrap", records)));
++		for (const records of partitionComboRecords(application)) artifacts.push(validatedArtifact(buildBatch("application", records), () => buildBatch("application", records)));
+ 		const batchResponses = /* @__PURE__ */ new Map();
+ 		for (const artifact of artifacts) {
+ 			batchResponses.set(artifact.descriptor.url, {
+@@ -604,7 +623,7 @@ var ClientModuleRegistry = class extends Service {
+ 		}
+ 		const responses = new Map(batchResponses);
+ 		for (const record of this.table.values()) {
+-			const artifact = buildCombo([record], record.entry.rev);
++			const artifact = validatedArtifact(buildCombo([record], record.entry.rev), () => buildCombo([record], record.entry.rev));
+ 			responses.set(artifact.url, {
+ 				body: artifact.script,
+ 				contentType: "text/javascript; charset=utf-8"

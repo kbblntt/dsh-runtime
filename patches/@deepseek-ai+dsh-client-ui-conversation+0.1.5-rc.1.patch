@@ -1,0 +1,279 @@
+diff --git a/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js b/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js
+index 1b7f134..c9498df 100644
+--- a/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js
++++ b/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js
+@@ -1680,46 +1680,83 @@ window.__ModuleLoader__.load({
+ 			flush() {
+ 				if (!this.replacePending && this.dirty.size === 0 && !this.timelineDirty) return false;
+ 				if (this.replacePending) {
+-					this.replaceLocationData();
++					let failed = false;
++					try {
++						this.replaceLocationData();
++					} catch (error) {
++						failed = true;
++						console.error("[ui-conversation] location data replace failed:", error);
++					}
+ 					let published = false;
+ 					for (const target of this.activeTargets) {
+ 						const view = this.views.get(target);
+ 						if (view === void 0) continue;
+ 						const builder = view.builder ?? view.definition.create();
+ 						view.builder = builder;
+-						view.snapshot = builder.replace({
+-							nodes: this.buildTargetNodes(target, this.contextsByTarget.get(target)),
+-							timeline: this.locationIndex.snapshot()
+-						});
+-						published = true;
++						try {
++							view.snapshot = builder.replace({
++								nodes: this.buildTargetNodes(target, this.contextsByTarget.get(target)),
++								timeline: this.locationIndex.snapshot()
++							});
++							published = true;
++						} catch (error) {
++							failed = true;
++							console.error(`[ui-conversation] view target "${String(target)}" replace failed:`, error);
++						}
++					}
++					try {
++						this.locationIndex.publishData();
++					} catch (error) {
++						failed = true;
++						console.error("[ui-conversation] location index publish failed:", error);
+ 					}
+-					this.locationIndex.publishData();
+ 					this.replacePending = false;
+ 					this.dirty.clear();
+ 					this.dirtyByTarget.clear();
+ 					this.timelineDirty = false;
++					/* A failed target re-arms a full replace: the next flush rebuilds every
++					 * active target from the authoritative context set, healing the failure
++					 * instead of wedging dirty-clearing and freezing the view. */
++					if (failed) this.replacePending = true;
+ 					return published;
+ 				}
+ 				let published = false;
+-				if (this.applyDirtyLocationData()) this.timelineDirty = true;
++				let failed = false;
++				try {
++					if (this.applyDirtyLocationData()) this.timelineDirty = true;
++				} catch (error) {
++					failed = true;
++					console.error("[ui-conversation] location data apply failed:", error);
++				}
+ 				const timelineDirty = this.timelineDirty;
+ 				for (const target of this.activeTargets) {
+ 					const view = this.views.get(target);
+ 					if (view === void 0) continue;
+ 					const builder = view.builder;
+ 					if (builder === void 0) continue;
+-					const upserts = this.buildTargetUpserts(target, this.dirtyByTarget.get(target));
+-					if (upserts.length === 0 && !timelineDirty) continue;
+-					view.snapshot = builder.apply({
+-						upserts,
+-						timeline: this.locationIndex.snapshot()
+-					});
+-					published = true;
++					try {
++						const upserts = this.buildTargetUpserts(target, this.dirtyByTarget.get(target));
++						if (upserts.length === 0 && !timelineDirty) continue;
++						view.snapshot = builder.apply({
++							upserts,
++							timeline: this.locationIndex.snapshot()
++						});
++						published = true;
++					} catch (error) {
++						failed = true;
++						console.error(`[ui-conversation] view target "${String(target)}" apply failed:`, error);
++					}
++				}
++				try {
++					this.locationIndex.publishData();
++				} catch (error) {
++					failed = true;
++					console.error("[ui-conversation] location index publish failed:", error);
+ 				}
+-				this.locationIndex.publishData();
+ 				this.dirty.clear();
+ 				this.dirtyByTarget.clear();
+ 				this.timelineDirty = false;
++				if (failed) this.replacePending = true;
+ 				return published;
+ 			}
+ 			/**
+@@ -1900,14 +1937,21 @@ window.__ModuleLoader__.load({
+ 				const dependencies = /* @__PURE__ */ new Map();
+ 				const reader = this.readerFor(start.event.seq, dependencies);
+ 				context.state = void 0;
+-				context.state = requireState(context.definition, "start", context.definition.start(contextSnapshot(context), start, reader));
+-				this.replaceDependencies(context, dependencies);
+-				for (let index = 1; index < context.matches.length; index++) {
+-					const match = context.matches[index];
+-					if (match === void 0 || match.role !== "update") continue;
+-					const typed = contextSnapshot(context);
+-					context.state = requireState(context.definition, "update", context.definition.update(typed, match));
++				try {
++					context.state = requireState(context.definition, "start", context.definition.start(contextSnapshot(context), start, reader));
++					for (let index = 1; index < context.matches.length; index++) {
++						const match = context.matches[index];
++						if (match === void 0 || match.role !== "update") continue;
++						const typed = contextSnapshot(context);
++						context.state = requireState(context.definition, "update", context.definition.update(typed, match));
++					}
++				} catch (error) {
++					/* A replay failure must not poison every later flush: reset the state so
++					 * the view builder falls back to derived state from the match history. */
++					context.state = void 0;
++					console.error(`[ui-conversation] Context ${context.key} replay failed; falling back to derived state:`, error);
+ 				}
++				this.replaceDependencies(context, dependencies);
+ 				context.revision++;
+ 				this.revised.add(context);
+ 				this.markDirty(context);
+@@ -2094,8 +2138,14 @@ window.__ModuleLoader__.load({
+ 				const upserts = [];
+ 				for (const context of contexts ?? []) {
+ 					const previous = context.current.get(target) ?? null;
+-					const node = this.buildNode(context, target);
+-					if (node === null && previous !== null) throw new Error(`conversation Definition "${context.kind}" withdrew materialized target "${target}"; return the same key with hidden visibility instead`);
++					let node = this.buildNode(context, target);
++					if (node === null && previous !== null) {
++						if (context.withdrawWarned !== true) {
++							context.withdrawWarned = true;
++							console.error(`[ui-conversation] definition "${context.kind}" withdrew materialized target "${target}" (context ${context.key}); keeping the last node`);
++						}
++						node = previous;
++					}
+ 					context.current.set(target, node);
+ 					if (node !== null) upserts.push(node);
+ 				}
+@@ -2133,6 +2183,10 @@ window.__ModuleLoader__.load({
+ 						const previous = context.locationData[scope];
+ 						const next = this.buildLocationData(context, scope, previous);
+ 						if (previous === next) continue;
++						if (next === null && previous !== null && context.withdrawDataWarned !== true) {
++							context.withdrawDataWarned = true;
++							console.warn(`[ui-conversation] context ${context.key} withdrew previously published ${scope} location data`);
++						}
+ 						context.locationData[scope] = next;
+ 						changes.push({
+ 							owner: context.key,
+@@ -2517,10 +2571,14 @@ window.__ModuleLoader__.load({
+ 					this.replace(window);
+ 					return;
+ 				}
+-				this.revision = window.revision;
+ 				switch (window.change.kind) {
+ 					case "prepend":
+ 						this.publish(this.assembler.prepend(window.change.entries, window.hasMore));
++						/* Advance the revision only after the assembler accepted the change: a
++						 * failed append/prepend leaves the revision behind, so the next event's
++						 * revision jump routes through replace() and re-baselines the view from
++						 * the complete window instead of silently skipping the failed event. */
++						this.revision = window.revision;
+ 						return;
+ 					case "append": {
+ 						let publication = "none";
+@@ -2529,6 +2587,7 @@ window.__ModuleLoader__.load({
+ 							if (next === "immediate" || publication === "none") publication = next;
+ 						}
+ 						this.publish(publication);
++						this.revision = window.revision;
+ 						return;
+ 					}
+ 					case "settle-assistant":
+@@ -13687,6 +13746,9 @@ window.__ModuleLoader__.load({
+ 			"context.system": "系统提示词",
+ 			"context.tools": "工具定义",
+ 			"context.messages": "对话消息",
++			"context.compact": "压缩上下文",
++			"context.compacting": "正在压缩……",
++			"context.compactUnavailable": "当前无法压缩上下文。",
+ 			"settings.enter.title": "繁忙时的发送行为",
+ 			"settings.enter.description": "智能体运行时 Enter 键和发送按钮的行为；Cmd/Ctrl+Enter 使用另一行为",
+ 			"settings.enter.queue": "排队发送",
+@@ -13849,6 +13911,9 @@ window.__ModuleLoader__.load({
+ 			"context.system": "System prompt",
+ 			"context.tools": "Tool definitions",
+ 			"context.messages": "Messages",
++			"context.compact": "Compact context",
++			"context.compacting": "Compacting…",
++			"context.compactUnavailable": "Context compaction is unavailable right now.",
+ 			"settings.enter.title": "Send behavior while busy",
+ 			"settings.enter.description": "What Enter and the Send button do while the agent is running; Cmd/Ctrl+Enter uses the other behavior",
+ 			"settings.enter.queue": "Queue",
+@@ -15410,10 +15475,12 @@ window.__ModuleLoader__.load({
+ 			if (value < 1e6) return t("number.thousand", { value: scaled(value / 1e3) });
+ 			return t("number.million", { value: scaled(value / 1e6) });
+ 		}
+-		function ContextMeter({ useProjection, t }) {
++		function ContextMeter({ useProjection, t, command }) {
+ 			const pressure = useProjection("contextPressure");
+ 			const breakdown = useProjection("contextBreakdown");
+ 			const [open, setOpen] = (0, react.useState)(false);
++			const [compacting, setCompacting] = (0, react.useState)(false);
++			const [compactNote, setCompactNote] = (0, react.useState)(void 0);
+ 			const rootRef = (0, react.useRef)(null);
+ 			const context = contextOccupancy(pressure);
+ 			const available = context !== null;
+@@ -15529,12 +15596,47 @@ window.__ModuleLoader__.load({
+ 									"aria-hidden": true
+ 								}), t(row.label)] }), (0, react_jsx_runtime.jsx)("dd", { children: `~${formatTokens(breakdown[row.key], t)}` })]
+ 							}, row.key))
++					}),
++					command === void 0 ? null : (0, react_jsx_runtime.jsx)("div", {
++						className: "dshContextCompact_foot",
++						children: (0, react_jsx_runtime.jsx)("button", {
++							type: "button",
++							className: "dshContextCompact_button",
++							disabled: compacting,
++							onClick: () => {
++								setCompacting(true);
++								setCompactNote(void 0);
++								Promise.resolve(command("/compact")).catch(() => false).then((matched) => {
++									setCompacting(false);
++									if (matched === true) setOpen(false);
++									else setCompactNote(t("context.compactUnavailable"));
++								});
++							},
++							children: compacting ? t("context.compacting") : t("context.compact")
+ 						})
+-					]
+-				})]
++					}),
++					compactNote === void 0 ? null : (0, react_jsx_runtime.jsx)("p", {
++						className: "dshContextCompact_note",
++						role: "status",
++						children: compactNote
++					})
++				]
++			})]
+ 			});
+ 		}
+ 		//#endregion
++		//#region dsh-context-compact: manual compaction action chrome
++		/** Panel action that asks the Host to condense the older history on demand. */
++		const COMPACT_CSS = ".dshContextCompact_foot{border-top:.5px solid var(--dsw-alias-border-l4);margin-top:10px;padding-top:10px;display:flex}.dshContextCompact_button{box-sizing:border-box;cursor:pointer;width:100%;height:30px;color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover-accent);border:none;border-radius:15px;justify-content:center;align-items:center;gap:6px;font-family:inherit;font-size:12px;line-height:18px;display:inline-flex}.dshContextCompact_button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}.dshContextCompact_button:disabled{cursor:default;opacity:.5}.dshContextCompact_note{color:var(--dsw-alias-label-tertiary);margin:8px 0 0;font-size:11px;line-height:16px}";
++		const COMPACT_CSS_TAG = "@deepseek-ai/dsh-client-ui-conversation/ContextCompact.module.css";
++		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(COMPACT_CSS_TAG) + "]") === null) {
++			const tag = document.createElement("style");
++			tag.dataset.plugin = "@deepseek-ai/dsh-client-ui-conversation";
++			tag.dataset.pluginCss = COMPACT_CSS_TAG;
++			tag.textContent = COMPACT_CSS;
++			document.head.appendChild(tag);
++		}
++		//#endregion
+ 		//#region \0dsh-css:/home/runner/work/deepseek-harness/deepseek-harness/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.module.css.mjs
+ 		const css$2 = ".Sh0Q9G_trigger{min-width:0;max-width:220px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:24px;outline:none;align-items:center;gap:4px;padding:0 4px 0 8px;font-size:13px;font-weight:500;line-height:20px;display:inline-flex}.Sh0Q9G_trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.Sh0Q9G_trigger:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}.Sh0Q9G_trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}.Sh0Q9G_triggerIcon{flex:none;display:inline-flex}.Sh0Q9G_triggerIcon svg{width:14px;height:14px}.Sh0Q9G_triggerLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Sh0Q9G_chevron{color:var(--dsw-alias-label-caption);flex:none;transition:transform .12s;display:inline-flex}@container (width<=460px){.Sh0Q9G_trigger:has(.Sh0Q9G_triggerIcon) .Sh0Q9G_triggerLabel{display:none}}.Sh0Q9G_chevronOpen{transform:rotate(180deg)}";
+ 		const tagId$2 = "@deepseek-ai/dsh-client-ui-conversation/PermissionSelect.module.css";
+@@ -16184,7 +16286,8 @@ window.__ModuleLoader__.load({
+ 										sessionId === void 0 ? null : renderSlot("conversation.input.model", { locked: modelSeatLocked }),
+ 										(0, react_jsx_runtime.jsx)(ContextMeter, {
+ 											useProjection,
+-											t
++											t,
++											command
+ 										}),
+ 										interruptible && (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+ 											label: t("input.stop"),

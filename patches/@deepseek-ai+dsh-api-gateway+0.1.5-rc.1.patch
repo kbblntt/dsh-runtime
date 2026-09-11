@@ -1,0 +1,20 @@
+diff --git a/node_modules/@deepseek-ai/dsh-api-gateway/lib/client.js b/node_modules/@deepseek-ai/dsh-api-gateway/lib/client.js
+index 210c78a..d73b073 100644
+--- a/node_modules/@deepseek-ai/dsh-api-gateway/lib/client.js
++++ b/node_modules/@deepseek-ai/dsh-api-gateway/lib/client.js
+@@ -905,7 +905,14 @@ window.__ModuleLoader__.load({
+ 			signal.throwIfAborted();
+ 			if (connection.generation.getSnapshot() !== void 0) {
+ 				if (attempt === 1) return;
+-				throw error;
++				/* The carrier snapshot can lag the physical socket, so a second strike while
++				 * "connected" is usually a reconnect flap rather than a poisoned carrier.
++				 * Back off briefly and retry instead of terminating the stream; accept()
++				 * and restart() reset the attempt budget. */
++				await new Promise((resolve) => {
++					setTimeout(resolve, Math.min(5000, 100 * Math.pow(2, Math.min(attempt - 2, 5))));
++				});
++				return;
+ 			}
+ 			await new Promise((resolve, reject) => {
+ 				const subscription = { finished: false };

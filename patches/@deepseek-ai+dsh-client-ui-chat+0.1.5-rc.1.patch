@@ -1,0 +1,54 @@
+diff --git a/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js b/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
+index 1b3efb7..cecbf87 100644
+--- a/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
++++ b/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
+@@ -4557,9 +4557,23 @@ window.__ModuleLoader__.load({
+ 				}
+ 			};
+ 		}
++		const assistantDiagnostics = { withdraw: new Set(), location: new Set(), data: new Set() };
++		function noteAssistantDiagnostic(kind, key, detail) {
++			const seen = assistantDiagnostics[kind];
++			if (seen.has(key)) return;
++			seen.add(key);
++			if (seen.size > 64) seen.clear();
++			console.warn(`[ui-chat] assistant ${kind}: ${key} ${detail}`);
++		}
+ 		function publishedAssistantData(context) {
+ 			const location = context.start?.location ?? context.matches.at(-1)?.location;
+-			return location?.kind === "step" ? location.step.data.get("assistant-step") : void 0;
++			if (location?.kind === "step") {
++				const data = location.step.data.get("assistant-step");
++				if (data === void 0 && context.matches.length > 0) noteAssistantDiagnostic("missing step data", context.key, `matches=${context.matches.length} start=${context.start !== void 0}`);
++				return data;
++			}
++			if (context.matches.length > 0) noteAssistantDiagnostic("non-step location", context.key, `kind=${location?.kind ?? "none"} matches=${context.matches.length} start=${context.start !== void 0}`);
++			return void 0;
+ 		}
+ 		/** Per-step Assistant streaming/final/interruption Definition. */
+ 		const assistantDefinition = {
+@@ -4609,15 +4623,21 @@ window.__ModuleLoader__.load({
+ 				};
+ 			},
+ 			buildViewNode: (context) => {
++				const materialized = context.current.get("chat");
++				const keep = () => {
++					if (materialized === void 0 || materialized === null) return null;
++					noteAssistantDiagnostic("withdraw", context.key, `state=${context.state !== void 0} matches=${context.matches.length}`);
++					return materialized;
++				};
+ 				const state = context.state ?? fallbackState$5(context);
+-				if (state === void 0) return null;
++				if (state === void 0) return keep();
+ 				const data = publishedAssistantData(context);
+-				if (data === void 0) return null;
++				if (data === void 0) return keep();
+ 				const settled = data.finalNode;
+ 				const visible = settled === void 0 ? state.visibleBlocks > 0 : hasVisibleContent(data.blocks);
+ 				if (settled === void 0 && !visible) {
+ 					const current = context.current.get("chat");
+-					if (!state.hidden || current === void 0 || current === null) return null;
++					if (!state.hidden || current === void 0 || current === null) return keep();
+ 				}
+ 				return chatNode(context, "assistant-step", settled?.seq ?? state.firstVisibleSeq ?? context.matches[0]?.event.seq ?? 0, data, { visibility: settled?.interrupted === true || visible ? "visible" : "hidden" });
+ 			}

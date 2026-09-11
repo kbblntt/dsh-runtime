@@ -1,32 +1,53 @@
-# DSH 独立运行时(已脱离 npx)
+# DSH 独立运行时（0.1.5-rc.1，插件化架构）
 
-本目录是 `@deepseek-ai/dsh` 0.1.2-rc.1 的完整独立安装,从 npx 缓存
-(`%LOCALAPPDATA%\npm-cache\_npx\1e7f6d9597241db0`)完整复制而来,
-不依赖 npx / npm 缓存即可运行。
+本目录是 `@deepseek-ai/dsh` 的独立安装（最初从 npx 缓存复制，2026-09-10 起改为 npm 管理并升级到 0.1.5-rc.1）。
+你的全部自定义修改已**脱离 node_modules**，分为两层：
+
+1. **功能层 = 6 个 dsh 插件**（在 `~/.dsh/profiles/web/plugins/`，快照在 `F:\DSH\dsh-migration\plugins-snapshot\`）：
+   | 插件 | 功能 |
+   |---|---|
+   | `dsh-user-system-prompt` | 自定义系统提示词（设置→系统提示词） |
+   | `dsh-notification-sounds` | 任务完成/报错/提权提示音（设置→提示音） |
+   | `dsh-custom-background` | 自定义背景壁纸（设置→背景） |
+   | `dsh-model-probe` | 模型连通性探测 + 已存 key 读回 + 伴生 key 池（设置→模型探测） |
+   | `dsh-key-rotation` | `<ref>_2`…`<ref>_9` 多 key 逐请求轮换（无 UI，宿主面） |
+   | `dsh-session-archive` | 归档会话恢复/永久删除（设置→归档） |
+2. **稳健性修复层 = 6 个 patch-package 补丁**（在本目录 `patches/`，`npm install` 后由 postinstall 自动重放）：
+   api-gateway 重试退避、api-session-controller seq 容忍+resync、client-modules 撕裂重建+boot 图自愈、client-ui-chat 防闪烁、client-ui-conversation timeline healing+压缩按钮、llm-pi-ai 上下文解析增强。
+
+数据（会话/设置/凭据）仍在 `%USERPROFILE%\.dsh`，与安装位置无关。
 
 ## 使用
 
-    dsh web              # 启动 Web UI(等价于原来的 npx @deepseek-ai/dsh web)
-    dsh --help           # 查看启动器帮助
-    dsh web --help       # 查看 web 应用参数(--host/--port/--no-open/--trusted-host)
+    dsh web              # 启动 Web UI
+    dsh --help           # 启动器帮助
 
-`dsh` 命令来自本目录的 dsh.cmd / dsh.ps1 / dsh(本目录已加入用户 PATH;
-已开的终端需要重开才能生效)。
+`dsh` 命令来自本目录的 dsh / dsh.ps1（本目录已加入用户 PATH）。
 
-也可以不经 PATH 直接运行:
+## 升级（正常升级，不再覆盖你的修改）
 
-    F:\dsh-runtime\dsh.cmd web
-    node F:\dsh-runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web
+1. 改 `package.json` 里 `@deepseek-ai/dsh` 的版本（或 `npm i @deepseek-ai/dsh@<新版本>`）。
+2. `npm install` —— postinstall 会自动跑 `patch-package` 重放 `patches/` 里的补丁。
+   - 补丁与新版代码冲突时 patch-package 会**响亮报错**（不会静默丢失）：按
+     `F:\DSH\dsh-migration\patches-inventory.md` 的映射表把该修复移植到新代码，
+     再 `npx patch-package <包名>` 重新生成补丁。
+3. 插件不受升级影响（它们在 `~/.dsh` 里）。若某个插件依赖的官方内部结构在新版变了，
+   插件会自检失败并报错（如 dsh-session-archive 的 registry 断言），按 inventory 适配即可。
+4. 冒烟：`dsh web --no-open`，打开设置确认六个分区仍在。
 
-## 机制说明
+**不要再使用 robocopy /MIR 覆盖 node_modules 的旧升级法**——那会抹掉 patch-package 补丁。
 
-- `~\.dsh\profiles\node_modules\@deepseek-ai\*` 的 junction 在每次启动时由
-  dsh 的 `healProfilesModuleFallback` 自动指向"当前运行安装"的依赖闭包;
-  从本目录启动后它们会自动重指向 F:\dsh-runtime,此后删除 npx 缓存不影响运行。
-- 当前正在运行的旧实例(从 npx 缓存启动的)不受影响,退出后即可全部切换到本目录。
-- 数据(会话、设置、凭据)仍在 `%USERPROFILE%\.dsh`,与安装位置无关。
+## 插件管理
 
-## 升级
+    dsh plugin --profile web add <插件绝对路径>     # 接入（pnpm link + 自动加入 bundles）
+    dsh plugin --profile web remove <包名>          # 移除
 
-    npx @deepseek-ai/dsh --version     # 先用 npx 装新版进缓存
-    robocopy "%LOCALAPPDATA%\npm-cache\_npx\<新版哈希>\node_modules" "F:\dsh-runtime\node_modules" /E /MIR
+改插件代码后需重启 `dsh web`（客户端 bundle 在服务端启动时组装）。
+
+## 排障
+
+- 设置里某个自建分区空白：多为该插件 client face 渲染异常（React 边界静默吞错）。
+  用 `F:\DSH\dsh-migration\render-sounds-test.js` 同款方法在 Node 里渲染定位。
+- Web UI 401：token 一次性，用 `dsh web` 打印的带 token URL 重新打开。
+- 完整迁移档案：`F:\DSH\dsh-migration\`（双基线 tarball、37 个原始 diff、清单、组装脚本）。
+- 升级前锚点快照：本目录 git 仓库（`git log` 可见 0.1.2 补丁态与 0.1.5 迁移态）。
