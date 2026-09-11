@@ -1,5 +1,5 @@
 diff --git a/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js b/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js
-index aa8ef80..c2555e8 100644
+index aa8ef80..e5d4787 100644
 --- a/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js
 +++ b/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js
 @@ -251,6 +251,24 @@ window.__ModuleLoader__.load({
@@ -2066,7 +2066,7 @@ index aa8ef80..c2555e8 100644
 +						} catch {
 +							parsed = null;
 +						}
-+						const valid = parsed !== null && typeof parsed === "object" && parsed.v === 3 && parsed.windowDays === USAGE_WINDOW_DAYS && parsed.sessions !== null && typeof parsed.sessions === "object";
++						const valid = parsed !== null && typeof parsed === "object" && parsed.v === 4 && parsed.windowDays === USAGE_WINDOW_DAYS && parsed.sessions !== null && typeof parsed.sessions === "object";
 +						if (!valid) {
 +							try {
 +								localStorage.removeItem(USAGE_CACHE_KEY);
@@ -2079,9 +2079,9 @@ index aa8ef80..c2555e8 100644
 +						return void 0;
 +					}
 +				},
-+				cacheWrite: (sessions) => {
-+					const cache = {
-+						v: 3,
++					cacheWrite: (sessions) => {
++						const cache = {
++							v: 4,
 +						windowDays: USAGE_WINDOW_DAYS,
 +						generatedAt: Date.now(),
 +						sessions
@@ -2681,7 +2681,7 @@ index aa8ef80..c2555e8 100644
 +								entry,
 +								sub
 +							});
-+						} else if (entry !== null && typeof entry === "object" && typeof entry.seq === "number" && entry.seq < asOf && typeof entry.model === "string" && entry.buckets !== null && typeof entry.buckets === "object") {
++						} else if (entry !== null && typeof entry === "object" && typeof entry.seq === "number" && entry.seq >= 0 && entry.seq < asOf && typeof entry.model === "string" && entry.buckets !== null && typeof entry.buckets === "object") {
 +							const sub = usageSeedAccumulator(entry, cutoffDay);
 +							const span = usageSeedSpan(entry, cutoff);
 +							if (span !== void 0) sub.sessions.push(span);
