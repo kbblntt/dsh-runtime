@@ -1,0 +1,26 @@
+diff --git a/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js b/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js
+index 6581be2..d22ca28 100644
+--- a/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js
++++ b/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js
+@@ -286,7 +286,7 @@ class Client extends protocol_js_1.Protocol {
+             const result = await this.request({
+                 method: 'initialize',
+                 params: {
+-                    protocolVersion: types_js_1.LATEST_PROTOCOL_VERSION,
++                    protocolVersion: options?.protocolVersion ?? types_js_1.LATEST_PROTOCOL_VERSION,
+                     capabilities: this._capabilities,
+                     clientInfo: this._clientInfo
+                 }
+diff --git a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
+index 30795e5..a6b8f2d 100644
+--- a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
++++ b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
+@@ -282,7 +282,7 @@ export class Client extends Protocol {
+             const result = await this.request({
+                 method: 'initialize',
+                 params: {
+-                    protocolVersion: LATEST_PROTOCOL_VERSION,
++                    protocolVersion: options?.protocolVersion ?? LATEST_PROTOCOL_VERSION,
+                     capabilities: this._capabilities,
+                     clientInfo: this._clientInfo
+                 }

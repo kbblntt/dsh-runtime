@@ -1,0 +1,16 @@
+# session plan files (local-only)
+.zcode/
+
+# dependencies & build output
+node_modules/
+dist/
+build/
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# os junk
+Thumbs.db
+.DS_Store

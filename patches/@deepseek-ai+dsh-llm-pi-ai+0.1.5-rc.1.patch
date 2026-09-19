@@ -1,8 +1,96 @@
 diff --git a/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js b/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js
-index e06cf8d..519226d 100644
+index e06cf8d..f83d9f7 100644
 --- a/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js
 +++ b/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js
-@@ -2112,6 +2112,18 @@ function authContextFrom(ctx) {
+@@ -372,6 +372,58 @@ function catalogModels(provider) {
+ 	return new Map(models.map((model) => [model.id, model]));
+ }
+ /**
++* Catalog-route priorities for the by-id index: a vendor's own catalog
++* (moonshotai, deepseek, zai, qwen-token-plan-cn, …) describes its models'
++* wire behavior best, so when the same id is listed by a vendor and by a
++* gateway or aggregator, the vendor entry wins.
++*/
++const CATALOG_ROUTE_PRIORITY = new Map([
++	["opencode", 0],
++	["opencode-go", 0],
++	["baseten", 0],
++	["together", 0],
++	["huggingface", 0],
++	["openrouter", 0],
++	["nvidia", 0],
++	["vercel-ai-gateway", 0],
++	["cloudflare-ai-gateway", 0],
++	["fireworks", 0],
++	["github-copilot", 0]
++]);
++/** The compatible wire protocols a hand-declared route may name. */
++const CATALOG_INDEX_APIS = new Set(["openai-completions", "openai-responses"]);
++/** The by-id index over every installed catalog, built once on first use. */
++let globalCatalogIndex;
++/**
++* One installed catalog entry by exact model id, regardless of which provider
++* route lists it. This is what lets a hand-declared route — a gateway the
++* installed catalog has never heard of — serve a model the catalog *does*
++* know by its own official wire behavior: the vendor's reasoning capability,
++* thinking-level map, and compat switches reach the route's model without the
++* profile restating them. Vendor catalogs outrank gateway/aggregator catalogs
++* that list the same id; among equals the first installed catalog wins.
++* @param id - exact model id.
++* @returns the catalog entry, or `undefined` when no installed catalog describes it.
++*/
++function globalCatalogModel(id) {
++	if (id === void 0 || id.length === 0) return void 0;
++	globalCatalogIndex ??= buildGlobalCatalogIndex();
++	return globalCatalogIndex.get(id);
++}
++function buildGlobalCatalogIndex() {
++	const index = /* @__PURE__ */ new Map();
++	for (const provider of getBuiltinProviders()) {
++		const priority = CATALOG_ROUTE_PRIORITY.get(provider) ?? 1;
++		for (const model of getBuiltinModels(provider)) {
++			if (!CATALOG_INDEX_APIS.has(model.api)) continue;
++			const previous = index.get(model.id);
++			if (previous !== void 0 && priority <= previous.priority) continue;
++			index.set(model.id, { entry: model, priority });
++		}
++	}
++	return new Map([...index].map(([id, hit]) => [id, hit.entry]));
++}
++/**
+ * Disposition of every `OpenAICompletionsCompat` field. The `Record` key type
+ * is a drift gate: a pi-ai upgrade that adds a field fails compilation here
+ * until it is classified, so the offer never silently lags the upstream set.
+@@ -561,7 +613,14 @@ function sharedCatalogApi(defaults) {
+ */
+ function resolveModelReasoning(provider, entry, base) {
+ 	const efforts = entry.reasoningEfforts;
+-	if (efforts === void 0) return { reasoning: base?.reasoning ?? false };
++	if (efforts === void 0) {
++		const inherited = base ?? globalCatalogModel(entry.id);
++		if (inherited?.reasoning === true) return {
++			reasoning: true,
++			...inherited.thinkingLevelMap === void 0 ? {} : { thinkingLevelMap: inherited.thinkingLevelMap }
++		};
++		return { reasoning: inherited?.reasoning ?? false };
++	}
+ 	if (efforts === false) return { reasoning: false };
+ 	if (efforts === null || Object.keys(efforts).length === 0) invalid(provider, `model "${entry.id}" has an empty reasoningEfforts; declare the offered levels, set false for a non-reasoning model, or omit the field to keep the installed catalog's capability`);
+ 	const declared = THINKING_LEVELS.flatMap((level) => {
+@@ -615,9 +674,10 @@ function resolveModelCompat(provider, entry, route, base, api) {
+ 		}
+ 		configured[field] = value;
+ 	}
+-	if (Object.keys(configured).length === 0) return {};
++	const inheritedCompat = base?.api === api ? base.compat : base === void 0 ? globalCatalogModel(entry.id)?.api === api ? globalCatalogModel(entry.id)?.compat : void 0 : void 0;
++	if (Object.keys(configured).length === 0) return inheritedCompat === void 0 ? {} : { compat: inheritedCompat };
+ 	return { compat: {
+-		...base?.api === api ? base.compat : void 0,
++		...inheritedCompat,
+ 		...configured
+ 	} };
+ }
+@@ -2112,6 +2172,18 @@ function authContextFrom(ctx) {
  * Every other protocol reports that it cannot be interrogated so the surface
  * falls back to hand-entry rather than guessing its response fields.
  *
@@ -21,7 +109,7 @@ index e06cf8d..519226d 100644
  * @module dsh-llm-pi-ai/discovery
  */
  /**
-@@ -2144,6 +2156,83 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+@@ -2144,6 +2216,83 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
  function capacity(...candidates) {
  	for (const candidate of candidates) if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) return candidate;
  }
@@ -105,7 +193,7 @@ index e06cf8d..519226d 100644
  /** A non-empty string field of a listing entry, or `undefined`. */
  function label(...candidates) {
  	for (const candidate of candidates) if (typeof candidate === "string" && candidate.length > 0) return candidate;
-@@ -2215,6 +2304,12 @@ async function readBounded(response, url) {
+@@ -2215,6 +2364,12 @@ async function readBounded(response, url) {
  * interrogation: a single malformed row should not deny the user the rest of
  * a working endpoint's catalog. Missing names fall back to the adopted id so
  * the Web form receives a complete human-readable row.
@@ -118,7 +206,7 @@ index e06cf8d..519226d 100644
  */
  function readListing(body) {
  	const listing = body;
-@@ -2230,13 +2325,14 @@ function readListing(body) {
+@@ -2230,13 +2385,14 @@ function readListing(body) {
  		}));
  	}
  	const models = [];
